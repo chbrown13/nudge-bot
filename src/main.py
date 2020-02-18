@@ -1,152 +1,106 @@
 import datetime
 import json
 import os
+import pprint
+import re
 import requests
-from util import _get_time, project_health
+import yaml
+from util import bots, get_time, get_tasks
 
 
 projects = {}
 headers= {
-			"content-type": "application/json",
-            "Accept": "application/vnd.github.inertia-preview+json",
-            "Time-Zone": "America/New_York",
-			"Authorization": 'token {}'.format(os.environ['NCSU_GITHUBTOKEN'])
-		}
-org = "csc510-fall2019"
-staff = ["cjparnin","smirhos","ffahid","yshi26","dcbrow10"]
-    
+    "content-type": "application/json",
+    "Accept": "application/vnd.github.inertia-preview+json",
+    "Time-Zone": "America/New_York",
+    "Authorization": 'token {}'.format(os.environ['NCSU_GITHUBTOKEN'])
+}
+ORG = "csc510-fall2019" #  "cscdevops-spring2020" 
 
-def get_slackers(repos):
-    slackers = {}
-    for r in repos:
-        slackers['repo'] = None
-        repo = r['name']
-        collabs = requests.get('https://api.github.ncsu.edu/repos/{org}/{repo}/collaborators'
-            .format(org=org,repo=repo), headers=headers).json()
-        students = [c['login'] for c in collabs if c['login'] not in staff]
-        print(repo)
-        for s in students:
-            commits = requests.get('https://api.github.ncsu.edu/repos/{org}/{repo}/commits?author={stud}&sort=committer-date'
-                .format(org=org,repo=repo,stud=s), headers=headers).json()
-            if len(commits) > 0:
-                print('\t' + s + ': ' + str(len(commits)))
-            else:
-                print('\t' + s + ': 0')
-            # if dev not in devs:
-            #     devs.append(dev)
-        # print(students)
-        # print(devs)
-            # date = c['commit']['committer']['date']
-            # temp = datetime.datetime.strptime(date, '%Y-%m-%dT%H:%M:%SZ')
-            # if (slackers[dev] is None or temp > slackers[dev][0]):
-            #     slackers[dev] = [temp, repo]
-            # # date = c['commit']['commit']['author']['date']
-            # # update = datetime.datetime.strptime(date, '%Y-%m-%dT%H:%M:%SZ')
-            # # if slackers[dev] is None or slackers[dev] < update:
-            # #     slackers[dev] = update
-    # now = datetime.datetime.utcnow()
-    # for key in slackers.keys():
-    #     print(key)
-    #     print('\n\t'.join(slackers[key]))
-        
-            
+staff = ["cjparnin","smirhos","ffahid","yshi26","dcbrow10"]           
+# board_info = {
+#     "name":"Team Project", 
+#     "body":"Hi Team, it looks like you haven't made any recent updates to your team project repository. To improve the quality of your code and productivity of your team, consider using the GitHub Projects feature to create tasks and track their progress on your work for the final project."
+# }
+board_info = {
+    "name": "Milestone1",
+    "body": "CSC 519 DevOps Project Milestone1",
+}
+FIRST_NOTE = "You can use cards to keep track of upcoming project tasks, current work in progress, and items you've completed for the CSC326 final project. Move this card to ***Done*** after you've read this message."
+TASK_NOTE = "Hi. The bot noticed there has not been activity on **{task}**. The deadline for this milestone is ***{date}***."
+ISSUE_NOTE = "Issue #{number}"
+PULL_NOTE = "Pull Request #{number}"
+# COLUMNS = ["To Do", "In Progress", "Done"]
+COLUMNS = ['Tasks', 'In-Progress', 'Review', 'Completed']
 
+def add_project(name):
+    project = requests.post('https://api.github.ncsu.edu/repos/{org}/{repo}/projects'
+        .format(org=ORG, repo=name), 
+        data=json.dumps(board_info), headers=headers).json()
+    for col in COLUMNS:
+        column = requests.post(project['columns_url'], data=json.dumps({"name":col}), headers=headers).json()
+        if col == "To Do":
+            card_url = column['cards_url']
+    card = requests.post(card_url, data=json.dumps({"note":FIRST_NOTE}), headers=headers).json()
+    if 'error' not in card.keys():
+        return project
 
-def get_projects(repo):
-    has_board = False
-    has_columns = False
-    has_cards = False
-    updated_cards = False
+def nudge_projects(repo):
     name = repo['name']
     projects[name] = {}
     project_list = requests.get('https://api.github.ncsu.edu/repos/{org}/{repo}/projects'
-        .format(org=org,repo=name), headers=headers).json()
-    if len(project_list) > 0:
-        has_board = True
-    for p in project_list:
-        proj_id = p['id']
-        proj = p['name']
-        projects[name]['project'] = {proj: {}}
-        columns = requests.get('https://api.github.ncsu.edu/projects/{id}/columns'
-            .format(id=proj_id), headers=headers).json()
-        if len(columns) > 0:
-            has_columns = True
-        for c in columns:
-            col_id = c['id']
-            col = c['name']
-            projects[name]['project'][proj] = {col: []}
-            cards = requests.get('https://api.github.ncsu.edu/projects/columns/{id}/cards'
-                .format(id=col_id), headers=headers).json()
-            if len(cards) > 0:
-                has_cards = True
-            for card in cards:
-                updated = datetime.datetime.strptime(card['updated_at'], '%Y-%m-%dT%H:%M:%SZ')
-                now = datetime.datetime.utcnow()
-                diff = (now - updated).total_seconds()
-                if card['note'] is not None:
-                    projects[name]['project'][proj][col].append((card['note'], _get_time(diff)))
-                if diff < 86400:
-                    updated_cards = True
-        health = sum([has_board, has_columns, has_cards, updated_cards])
-        if health == 4:
-            project_health(repo, 'HIGH')
-        elif health <= 1:
-            project_health(repo, 'LOW')
-        else:
-            project_health(repo, 'MED')
-        print('      ' + _get_time(diff) + ' ' + str(diff) + ' ' + str(health) + ' ' + str([has_board, has_columns, has_cards, updated_cards]))
-
-    with open('projects.txt', 'w') as f:
-        for k,v in projects.items():
-            f.write(k + '\n')
-            if type(v) == dict:
-                for j,u in v.items(): # projects
-                    f.write('* ' + j + '\n')
-                    if type(u) == dict:
-                        for i,t in u.items(): # columns
-                            f.write('  + ' + i + '\n')
-                            s = sorted(t, key=lambda x: x[1])
-                            for d in s:
-                                # print(d)
-                                f.write('    - ' + d[0].encode('utf8').replace('\r\n', ' ').replace('\n','') + ': ' + str(d[1]) + '\n')
-                    else:
-                        f.write(u + '\n')
-            else:
-                f.write(v + '\n')
-            
-def get_updates(repo, user=None):
-    name = repo['name']
-    branches = requests.get('https://api.github.ncsu.edu/repos/{org}/{repo}/branches'
-        .format(org=org,repo=name), headers=headers).json()
-    updated = None
-    latest_branch = ''
-    for b in branches:
-        branch = b['name']
-        commit = requests.get('https://api.github.ncsu.edu/repos/{org}/{repo}/branches/{branch}'
-            .format(org=org,repo=name,branch=branch), headers=headers).json()
-        date = commit['commit']['commit']['author']['date']
-        temp = datetime.datetime.strptime(date, '%Y-%m-%dT%H:%M:%SZ')
-        if updated is None or temp > updated:
-            updated = temp
-            latest_branch = branch
-    now = datetime.datetime.utcnow()
-    diff = (now - updated).total_seconds()
-    projects[name]['update'] = [_get_time(diff), latest_branch]
-    # with open('updated.txt', 'w') as f:
-    #     for u in updates:
-    #         f.write("{:9s} {time} ({branch})\n".format(u[0], time=_get_time(u[1]), branch=u[2]))
+        .format(org=ORG,repo=name), headers=headers).json()
+    if len(project_list) == 0: # No project board
+        add_project(name)
+        return
+    else:
+        for p in project_list:
+            if p['name'] == board_info['name']:
+                columns = requests.get(p['columns_url'], headers=headers).json()
+                for col in columns:
+                    if col['name'] == COLUMNS[0]:
+                        todo = col
+                        break
+                break
+        now = datetime.datetime(2019,11,19,11,45,00) # datetime.datetime.now()
+        task = get_tasks(now)
+        print(task)
+        if (task):
+            note = TASK_NOTE.replace('{task}', task['name']).replace('{date}', task['str_end'])
+            card = requests.post(todo['cards_url'], data=json.dumps({"note":note}), headers=headers).json()
+            print(card)
+        # TODO: create cards for activity (open PRs, issues, etc.)
+        # activity = get_activity(repo)
+        # for item in activity:
+        #     if item.get('pull_request'):
+        #         note = PULL_NOTE.replace('{number}', str(item['number'])) # , "content_id":item['number'], "content_type":'Issue'
+        #         pr_card = requests.post(todo['cards_url'], data=json.dumps({"note":note}), headers=headers).json()
+        #         print(pr_card)
+        #     else:
+        #         note = ISSUE_NOTE.replace('{number}', str(item['number'])) # , "content_id":item['number'], "content_type":'PullRequest'
+        #         iss_card = requests.post(todo['cards_url'], data=json.dumps({"note":note}), headers=headers).json()
+        #         print(iss_card)
 
 
+
+   # print(project)
+
+def get_activity(repo):
+    
+    issues = requests.get('https://api.github.ncsu.edu/repos/{org}/{repo}/issues'
+            .format(org=ORG,repo=repo['name']), headers=headers).json()
+    for iss in issues:
+        if iss['created_at']:
+            return issues
 
 def main():
-    response = requests.get('https://api.github.ncsu.edu/orgs/{org}/repos'.format(org=org), headers=headers).json()
+    # if not bots('.'):
+    #     return None
+
+    response = requests.get('https://api.github.ncsu.edu/orgs/{org}/repos'.format(org=ORG), headers=headers).json()
     for repo in response:
-        projects[repo['name']] = {'update': None, 'project': {}}
-        get_updates(repo)
-        get_projects(repo)
-    print(projects)
-# 
-# get_slackers(response)
+        if repo['name'] in ['iTrust2-v6', 'CSC510-TEST']: #TODO remove later
+            nudge_projects(repo)
     
 if __name__ == "__main__":
     main()
